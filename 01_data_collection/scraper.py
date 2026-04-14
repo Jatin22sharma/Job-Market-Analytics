@@ -27,7 +27,7 @@ SEARCH_QUERIES = [
 url = "https://jsearch.p.rapidapi.com/search"
 headers = {
     "X-RapidAPI-Key": API_KEY,
-    "X-RapidAPI-Host": "jsearch.p.rapidapi.com"
+    "X-RapidAPI-Host": "jsearch27.p.rapidapi.com"
 }
 
 # --- Function to fetch jobs for one query ---
