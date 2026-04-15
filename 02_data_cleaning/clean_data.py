@@ -1,148 +1,114 @@
-# ============================================
-# Step 3: Data Cleaning
-# Input:  01_data_collection/raw_data/jobs_raw.csv
-# Output: 02_data_cleaning/cleaned_data/jobs_clean.csv
-# ============================================
-
 import pandas as pd
 import os
 import re
 
-# --- Load raw data ---
 df = pd.read_csv("01_data_collection/raw_data/jobs_raw.csv")
-print(f"Raw data: {len(df)} rows, {df.shape[1]} columns")
-print("\nMissing values per column:")
-print(df.isnull().sum())  # shows how many blanks each column has
+print(f"Loaded: {len(df)} rows")
 
+# ── 1. Basic nulls ──────────────────────────────────────────
+df["skills_required"] = df["skills_required"].fillna("")
+df["description"]     = df["description"].fillna("")
+df["location"]        = df["location"].fillna("India")
+df["is_remote"]       = df["is_remote"].fillna(False)
+df["salary_min"]      = pd.to_numeric(df["salary_min"], errors="coerce").fillna(0)
+df["salary_max"]      = pd.to_numeric(df["salary_max"], errors="coerce").fillna(0)
 
-# Raw date looks like: "2025-04-01T13:45:00.000Z"
-# We only need: "2025-04-01"
+# ── 2. Salary disclosed flag (more useful than the number) ──
+df["salary_disclosed"] = df["salary_min"].apply(lambda x: "Yes" if x > 0 else "No")
 
-df["date_posted"] = pd.to_datetime(df["date_posted"], errors="coerce")
-df["date_posted"] = df["date_posted"].dt.date  # keep only the date part
+# ── 3. Salary bucket (only for rows that have it) ──────────
+def salary_bucket(val):
+    if val <= 0:        return "Not disclosed"
+    elif val < 50000:   return "Below 50K USD"
+    elif val < 100000:  return "50K-100K USD"
+    elif val < 150000:  return "100K-150K USD"
+    else:               return "150K+ USD"
 
-# Also extract month for trend analysis
-df["month_posted"] = pd.to_datetime(df["date_posted"]).dt.strftime("%b %Y")
+df["salary_range"] = df["salary_min"].apply(salary_bucket)
 
-# errors="coerce" means: if a date is unreadable, set it to NaT
-# instead of crashing the entire script
-
-# --- Extract skills FROM DESCRIPTION ---
+# ── 4. Skills from description + skills_required ───────────
 TOP_SKILLS = [
     "python", "sql", "excel", "power bi", "tableau",
     "azure", "aws", "machine learning", "spark",
-    "pandas", "numpy", "powerpoint", "mysql", "postgresql"
+    "pandas", "postgresql", "mysql", "powerpoint"
 ]
 
-# Note: removed "r" and "numpy" standalone — too error prone
-# We handle R language separately with word boundary check
-
-def has_skill(row, skill):
-    text = ""
-    if pd.notna(row.get("skills_required")):
-        text += str(row["skills_required"]).lower()
-    if pd.notna(row.get("description")):
-        text += str(row["description"]).lower()
-    if skill == "r":
-        # match " r " or "r," or "(r)" — not inside words
-        return 1 if re.search(r'\br\b', text) else 0
-    return 1 if skill.lower() in text else 0
+def check_skill(row, skill):
+    text = (str(row["skills_required"]) + " " + str(row["description"])).lower()
+    return 1 if skill in text else 0
 
 for skill in TOP_SKILLS:
-    col_name = "skill_" + skill.replace(" ", "_")
-    df[col_name] = df.apply(lambda row, s=skill: has_skill(row, s), axis=1)
+    df["skill_" + skill.replace(" ", "_")] = df.apply(lambda r, s=skill: check_skill(r, s), axis=1)
 
-# Add R language separately with word boundary
-df["skill_r"] = df.apply(lambda row: has_skill(row, "r"), axis=1)
-
-# --- Extract experience FROM DESCRIPTION (smarter version) ---
-def extract_experience(text):
-    if pd.isna(text):
-        return None
-    text = str(text).lower()
-
-    # Only look in the first 500 characters — company history appears later
-    text = text[:500]
-
-    # Must be a small number (1-20) to be valid job experience
-    match = re.search(r'(\d+)\s*(?:to|-)\s*(\d+)\s*years?\s*(?:of\s*)?(?:experience|exp)', text)
-    if match:
-        val = (int(match.group(1)) + int(match.group(2))) / 2
-        return val if val <= 20 else None
-
-    match = re.search(r'(\d+)\+?\s*years?\s*(?:of\s*)?(?:experience|exp)', text)
-    if match:
-        val = int(match.group(1))
-        return val if val <= 20 else None
-
-    match = re.search(r'(?:experience|exp)[^\d]*(\d+)\+?\s*years?', text)
-    if match:
-        val = int(match.group(1))
-        return val if val <= 20 else None
-
-    if "fresher" in text or "entry level" in text or "0 year" in text:
+# ── 5. Experience from description ─────────────────────────
+def extract_exp(text):
+    text = str(text).lower()[:600]
+    m = re.search(r'(\d+)\s*[-to]+\s*(\d+)\s*years?\s*(?:of\s*)?(?:exp|experience)?', text)
+    if m:
+        v = (int(m.group(1)) + int(m.group(2))) / 2
+        return v if v <= 20 else None
+    m = re.search(r'(\d+)\+?\s*years?\s*(?:of\s*)?(?:exp|experience)', text)
+    if m:
+        v = int(m.group(1))
+        return v if v <= 20 else None
+    m = re.search(r'(?:exp|experience)[^\d]{0,10}(\d+)\+?\s*years?', text)
+    if m:
+        v = int(m.group(1))
+        return v if v <= 20 else None
+    if any(w in text for w in ["fresher", "entry level", "0 year", "no experience"]):
         return 0
-
     return None
 
-df["experience_years"] = df["description"].apply(extract_experience)
+df["experience_years"] = df["description"].apply(extract_exp)
 
-def experience_label(val):
-    if pd.isna(val) or val == 0:
-        return "Fresher / Not specified"
-    elif val <= 1:
-        return "0-1 year"
-    elif val <= 2:
-        return "1-2 years"
-    elif val <= 4:
-        return "2-4 years"
-    else:
-        return "4+ years"
+def exp_label(v):
+    if pd.isna(v): return "Not specified"
+    elif v == 0:   return "Fresher"
+    elif v <= 2:   return "0-2 years"
+    elif v <= 5:   return "2-5 years"
+    else:          return "5+ years"
 
-df["experience_range"] = df["experience_years"].apply(experience_label)
+df["experience_range"] = df["experience_years"].apply(exp_label)
 
-# Raw titles are messy: "Sr. Data Anlyst", "DATA ANALYST", "data analyst - 2025"
-# We group them into clean categories
+# ── 6. Job category ────────────────────────────────────────
+def categorise(title):
+    t = str(title).lower()
+    if "business" in t:                              return "Business Analyst"
+    if any(w in t for w in ["ai", "machine learning", "ml"]): return "AI/ML Analyst"
+    if any(w in t for w in ["power bi", "tableau", "bi "]):   return "BI Analyst"
+    if "engineer" in t:                              return "Data Engineer"
+    if "data" in t:                                  return "Data Analyst"
+    if "analyst" in t:                               return "Other Analyst"
+    return "Other"
 
-def categorise_title(title):
-    if pd.isna(title):
-        return "Other"
-    title = title.lower()
-    if "business" in title:
-        return "Business Analyst"
-    elif "ai" in title or "artificial" in title or "machine learning" in title:
-        return "AI/ML Analyst"
-    elif "power bi" in title or "tableau" in title or "bi " in title:
-        return "BI Analyst"
-    elif "data" in title and "engineer" in title:
-        return "Data Engineer"
-    elif "data" in title:
-        return "Data Analyst"
-    elif "analyst" in title:
-        return "Other Analyst"
-    else:
-        return "Other"
+df["job_category"] = df["job_title"].apply(categorise)
 
-df["job_category"] = df["job_title"].apply(categorise_title)
+# ── 7. Clean location ──────────────────────────────────────
+def clean_location(loc):
+    loc = str(loc).strip()
+    if loc in ["IN", "India", "india"]: return "India (unspecified)"
+    return loc
 
-# --- Drop columns we no longer need ---
-df.drop(columns=["experience"], inplace=True)  # replaced by experience_years
+df["location"] = df["location"].apply(clean_location)
 
-# --- Remove any rows with no job title at all ---
-df.dropna(subset=["job_title"], inplace=True)
+# ── 8. Fix dates ───────────────────────────────────────────
+df["date_posted"]  = pd.to_datetime(df["date_posted"], errors="coerce").dt.date
+df["month_posted"] = pd.to_datetime(df["date_posted"], errors="coerce").dt.strftime("%b %Y")
 
-# --- Clean up whitespace in text columns ---
-df["job_title"]    = df["job_title"].str.strip()
-df["company_name"] = df["company_name"].str.strip()
-df["location"]     = df["location"].str.strip()
+# ── 9. Drop unused columns ─────────────────────────────────
+df.drop(columns=["experience"], inplace=True, errors="ignore")
 
-# --- Save the cleaned file ---
+# ── 10. Save ───────────────────────────────────────────────
 os.makedirs("02_data_cleaning/cleaned_data", exist_ok=True)
 df.to_csv("02_data_cleaning/cleaned_data/jobs_clean.csv", index=False)
 
-print(f"\nCleaning complete!")
-print(f"Cleaned rows : {len(df)}")
-print(f"Total columns: {df.shape[1]}")
-print(f"Saved to: 02_data_cleaning/cleaned_data/jobs_clean.csv")
-print(f"\nJob categories found:")
+print(f"\nDone! {len(df)} rows, {df.shape[1]} columns")
+print("\nJob categories:")
 print(df["job_category"].value_counts())
+print("\nExperience ranges:")
+print(df["experience_range"].value_counts())
+print("\nSalary disclosed:")
+print(df["salary_disclosed"].value_counts())
+skill_cols = [c for c in df.columns if c.startswith("skill_")]
+print("\nSkill counts:")
+print(df[skill_cols].sum().sort_values(ascending=False))
